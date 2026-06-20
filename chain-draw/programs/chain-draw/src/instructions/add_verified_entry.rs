@@ -3,10 +3,15 @@ use crate::state::{Campaign, CampaignStatus, Entry, HandleClaim};
 use crate::errors::ChainDrawError;
 
 #[derive(Accounts)]
-#[instruction(handle_hash: [u8; 32])]
+#[instruction(handle_hash: [u8; 32], participant_wallet: Pubkey)]
 pub struct AddVerifiedEntry<'info> {
     #[account(
         mut,
+        seeds = [
+            b"campaign",
+            campaign.organizer.as_ref(),
+            &campaign.campaign_id.to_le_bytes(),
+        ],
         bump = campaign.bump,
         constraint = campaign.status == CampaignStatus::Open @ ChainDrawError::CampaignNotOpen,
         constraint = Clock::get()?.unix_timestamp < campaign.cutoff_ts @ ChainDrawError::CutoffPassed,
@@ -14,7 +19,7 @@ pub struct AddVerifiedEntry<'info> {
     )]
     pub campaign: Account<'info, Campaign>,
 
-    /// Entry PDA — one per (campaign, index)
+    /// Entry PDA — seeded by (campaign, index) so it's indexable for the draw
     #[account(
         init,
         payer = verifier,
@@ -28,7 +33,7 @@ pub struct AddVerifiedEntry<'info> {
     )]
     pub entry: Account<'info, Entry>,
 
-    /// HandleClaim PDA — init fails if handle already entered (duplicate guard)
+    /// HandleClaim PDA — init fails on duplicate handle (on-chain uniqueness guard)
     #[account(
         init,
         payer = verifier,
@@ -42,14 +47,18 @@ pub struct AddVerifiedEntry<'info> {
     )]
     pub handle_claim: Account<'info, HandleClaim>,
 
-    /// Verifier backend keypair — pays gas, participant pays nothing
+    /// Backend verifier keypair — pays gas so participant pays nothing
     #[account(mut)]
     pub verifier: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(ctx: Context<AddVerifiedEntry>, handle_hash: [u8; 32]) -> Result<()> {
+pub fn handler(
+    ctx: Context<AddVerifiedEntry>,
+    handle_hash: [u8; 32],
+    participant_wallet: Pubkey,
+) -> Result<()> {
     let campaign = &mut ctx.accounts.campaign;
     let index = campaign.entry_count;
 
@@ -57,22 +66,30 @@ pub fn handler(ctx: Context<AddVerifiedEntry>, handle_hash: [u8; 32]) -> Result<
     let entry = &mut ctx.accounts.entry;
     entry.campaign = campaign.key();
     entry.index = index;
-    entry.participant_wallet = ctx.accounts.verifier.key(); // replaced with actual wallet — see note
+    entry.participant_wallet = participant_wallet;
     entry.handle_hash = handle_hash;
     entry.won = false;
     entry.paid = false;
     entry.bump = ctx.bumps.entry;
 
-    // Write handle claim (uniqueness guard)
+    // Write handle claim
     let claim = &mut ctx.accounts.handle_claim;
     claim.campaign = campaign.key();
     claim.handle_hash = handle_hash;
-    claim.participant_wallet = ctx.accounts.verifier.key();
+    claim.participant_wallet = participant_wallet;
     claim.bump = ctx.bumps.handle_claim;
 
     // Increment entry count
-    campaign.entry_count = campaign.entry_count.checked_add(1).unwrap();
+    campaign.entry_count = campaign
+        .entry_count
+        .checked_add(1)
+        .ok_or(ChainDrawError::InvalidEntryIndex)?;
 
-    msg!("Entry #{} added. Total entries: {}", index, campaign.entry_count);
+    msg!(
+        "Entry #{} added | wallet={} | total={}",
+        index,
+        participant_wallet,
+        campaign.entry_count
+    );
     Ok(())
 }

@@ -15,7 +15,7 @@ chain_draw = "J7G5n75tEWBPu1oNd5CfEq8Z6ZRR22FF5moMh25cmVy8"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+cluster = "https://devnet.helius-rpc.com/?api-key=02923ff0-3d68-4bb1-a1ad-407f5f7d1e5f"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

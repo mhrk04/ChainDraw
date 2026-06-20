@@ -1,6 +1,5 @@
 use anchor_lang::prelude::*;
 use crate::state::campaign::{Campaign, CampaignStatus};
-use crate::errors::ChainDrawError;
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct InitializeCampaignParams {
@@ -11,13 +10,13 @@ pub struct InitializeCampaignParams {
     pub prize_total: u64,
     pub num_winners: u8,
     pub cutoff_ts: i64,
-    /// Max 200 chars: Mastodon post URL + rules (stored off-chain; URI here)
+    /// Max 200 chars URI pointing to requirements JSON
     pub requirements_uri: String,
-    /// The Fixed or Recurring Delegation PDA derived client-side and stored for public verification
+    /// The Fixed or Recurring Delegation PDA — derived client-side, stored for public verification
     pub delegation_pda: Pubkey,
     /// false = FixedDelegation (one-shot); true = RecurringDelegation (weekly/monthly)
     pub is_recurring: bool,
-    /// Period in seconds — e.g. 604800 (weekly). Ignored if is_recurring = false.
+    /// Period length in seconds (604800 = weekly, 2592000 = monthly). 0 if not recurring.
     pub period_length: i64,
 }
 
@@ -44,13 +43,11 @@ pub struct InitializeCampaign<'info> {
 }
 
 pub fn handler(ctx: Context<InitializeCampaign>, params: InitializeCampaignParams) -> Result<()> {
-    require!(params.num_winners >= 1, ChainDrawError::NoEntries);
-    require!(
-        params.requirements_uri.len() <= 200,
-        ChainDrawError::CampaignNotOpen // reuse as validation error for now
-    );
+    require!(params.num_winners >= 1, anchor_lang::error::ErrorCode::ConstraintRaw);
+    require!(params.prize_total > 0, anchor_lang::error::ErrorCode::ConstraintRaw);
 
     let campaign = &mut ctx.accounts.campaign;
+    campaign.campaign_id = params.campaign_id;
     campaign.organizer = ctx.accounts.organizer.key();
     campaign.verifier = params.verifier;
     campaign.prize_mint = params.prize_mint;
@@ -67,9 +64,12 @@ pub fn handler(ctx: Context<InitializeCampaign>, params: InitializeCampaignParam
     campaign.bump = ctx.bumps.campaign;
 
     msg!(
-        "Campaign initialized: is_recurring={}, period_length={}s",
+        "Campaign {} initialized | recurring={} | period={}s | winners={} | prize={}",
+        params.campaign_id,
         params.is_recurring,
-        params.period_length
+        params.period_length,
+        params.num_winners,
+        params.prize_total,
     );
     Ok(())
 }

@@ -5,6 +5,8 @@ use anchor_lang::prelude::*;
 #[account]
 #[derive(Default)]
 pub struct Campaign {
+    /// Unique campaign id — stored so all instructions can re-derive PDA seeds
+    pub campaign_id: u64,
     /// Organizer wallet — must sign initialize + draw
     pub organizer: Pubkey,
     /// Verifier keypair (backend) — only signer allowed to call add_verified_entry
@@ -39,6 +41,7 @@ pub struct Campaign {
 impl Campaign {
     /// Account discriminator + all fixed fields + max requirements_uri (200 chars)
     pub const LEN: usize = 8   // discriminator
+        + 8    // campaign_id
         + 32   // organizer
         + 32   // verifier
         + 32   // prize_mint
