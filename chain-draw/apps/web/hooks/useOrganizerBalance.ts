@@ -30,12 +30,12 @@ export function useOrganizerBalance(organizerWallet: string | null, mint?: strin
         const data = await res.json();
         const accounts = data?.result?.value ?? [];
         if (accounts.length === 0) {
-          setBalance(0n);
+          setBalance(BigInt(0));
           return;
         }
         // Take the first ATA's balance
         const rawAmount = accounts[0]?.account?.data?.parsed?.info?.tokenAmount?.amount;
-        setBalance(rawAmount ? BigInt(rawAmount) : 0n);
+        setBalance(rawAmount ? BigInt(rawAmount) : BigInt(0));
       } catch {
         setBalance(null);
       } finally {

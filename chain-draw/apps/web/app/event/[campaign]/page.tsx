@@ -1,135 +1,163 @@
 // Route: /event/[campaign] — Giveaway Detail (public)
-// Stitch screen: 5b2300d4d036474a9206964d128e795a (Giveaway Detail)
-// PrizePoolPanel is wired to live chain data via useDelegation + useOrganizerBalance
+// Stitch screen: 5b2300d4d036474a9206964d128e795a
 
 import { PrizePoolPanel } from '@/components/PrizePoolPanel';
+import { JoinForm } from '@/components/JoinForm';
+import { WinnersPanel } from '@/components/WinnersPanel';
 import { VERIFIER_API } from '@/lib/constants';
+import Link from 'next/link';
 
-interface Props {
-  params: { campaign: string };
-}
+interface Props { params: { campaign: string } }
 
 async function getCampaignData(campaign: string) {
   try {
-    const res = await fetch(`${VERIFIER_API}/api/events/${campaign}`, {
-      next: { revalidate: 10 },
-    });
-    if (!res.ok) return null;
-    return res.json();
+    const [eventRes, drawRes] = await Promise.all([
+      fetch(`${VERIFIER_API}/api/events/${campaign}`, { next: { revalidate: 5 } }),
+      fetch(`${VERIFIER_API}/api/events/${campaign}/draw`, { next: { revalidate: 5 } }),
+    ]);
+    const event = eventRes.ok ? await eventRes.json() : null;
+    const draw = drawRes.ok ? await drawRes.json() : null;
+    return { event, draw };
   } catch {
-    return null;
+    return { event: null, draw: null };
   }
 }
 
-export default async function EventPage({ params }: Props) {
-  const data = await getCampaignData(params.campaign);
+function Countdown({ cutoffTs }: { cutoffTs: number }) {
+  const diff = cutoffTs - Math.floor(Date.now() / 1000);
+  if (diff <= 0) return <span style={{ color: '#93000a' }}>Entry closed</span>;
+  const h = Math.floor(diff / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  const display = h > 24 ? `${Math.floor(h / 24)}d ${h % 24}h` : `${h}h ${m}m`;
+  return <span style={{ color: '#006239' }}>{display} remaining</span>;
+}
 
-  // Fallback mock for development before any campaigns are created
-  const campaign = data ?? {
-    campaign: params.campaign,
-    title: 'ChainDraw Giveaway',
-    organizer: 'EoLYw86xT1M73oxj6foAeyQEiBKP35pwQpSX1i2XsYPn',
-    delegationPda: params.campaign,
-    prizeTotal: '100000000',
-    numWinners: 3,
-    cutoffTs: Math.floor(Date.now() / 1000) + 3600,
-    isRecurring: false,
-    periodLength: 0,
-    postUrl: '#',
-    entryCount: 0,
-    status: 'Open',
-  };
+export default async function EventPage({ params }: Props) {
+  const { event, draw } = await getCampaignData(params.campaign);
+
+  if (!event) {
+    return (
+      <main className="min-h-screen px-6 py-20 text-center" style={{ backgroundColor: '#f8f9ff' }}>
+        <p className="text-4xl">❓</p>
+        <p className="mt-4 text-xl font-semibold" style={{ color: '#0b1c30' }}>
+          Campaign not found
+        </p>
+        <Link href="/" className="mt-4 inline-block text-sm underline" style={{ color: '#004ac6' }}>
+          ← Back to Explore
+        </Link>
+      </main>
+    );
+  }
+
+  const isSettled = event.status === 'Settled';
 
   return (
-    <main className="min-h-screen bg-[#f8f9ff]">
-      {/* Nav */}
-      <nav className="border-b border-[#c3c6d7] bg-white px-6 py-4">
-        <a href="/" className="text-sm font-semibold text-[#2563eb]">← All Giveaways</a>
-      </nav>
+    <main className="min-h-screen" style={{ backgroundColor: '#f8f9ff' }}>
+      {/* Nav breadcrumb */}
+      <div className="border-b px-6 py-3" style={{ backgroundColor: '#ffffff', borderColor: '#c3c6d7' }}>
+        <div className="mx-auto flex max-w-3xl items-center gap-2 text-sm" style={{ color: '#737686' }}>
+          <Link href="/" style={{ color: '#004ac6' }}>Explore</Link>
+          <span>›</span>
+          <span style={{ color: '#0b1c30' }}>{event.title}</span>
+        </div>
+      </div>
 
-      <div className="mx-auto max-w-3xl space-y-6 px-6 py-10">
-        {/* Title */}
+      <div className="mx-auto max-w-3xl space-y-5 px-6 py-10">
+
+        {/* Title + meta */}
         <div>
-          <h1 className="text-3xl font-bold text-[#0b1c30]">{campaign.title}</h1>
-          <p className="mt-1 font-mono text-xs text-[#737686]">{params.campaign}</p>
-        </div>
-
-        {/* ── THE TRUST WIDGET ── */}
-        <PrizePoolPanel
-          campaignPubkey={params.campaign}
-          delegationPda={campaign.delegationPda}
-          organizer={campaign.organizer}
-          prizeTotal={campaign.prizeTotal}
-          numWinners={campaign.numWinners}
-          isRecurring={campaign.isRecurring}
-          periodLength={campaign.periodLength}
-        />
-
-        {/* Requirements */}
-        <div className="rounded-xl border border-[#c3c6d7] bg-white p-6">
-          <h2 className="text-lg font-semibold text-[#0b1c30]">Requirements</h2>
-          <div className="mt-4 space-y-3">
-            {[
-              { label: 'Favourite the post', href: campaign.postUrl },
-              { label: 'Boost (repost) the post', href: campaign.postUrl },
-              { label: 'Follow the organizer', href: campaign.postUrl },
-            ].map((r) => (
-              <div key={r.label} className="flex items-center justify-between rounded-lg bg-[#f8f9ff] px-4 py-3">
-                <span className="text-sm text-[#0b1c30]">{r.label}</span>
-                <a
-                  href={r.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="rounded-lg bg-[#2563eb] px-3 py-1.5 text-xs font-semibold text-white"
-                >
-                  Do on Mastodon ↗
-                </a>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Join Form */}
-        <div className="rounded-xl border border-[#c3c6d7] bg-white p-6">
-          <h2 className="text-lg font-semibold text-[#0b1c30]">Enter Giveaway</h2>
-          <p className="mt-1 text-sm text-[#434655]">
-            No wallet signature required. No gas fees. Just your Mastodon handle and prize wallet.
-          </p>
-          <div className="mt-4 space-y-3">
-            <div>
-              <label className="text-xs font-medium text-[#434655]">Mastodon handle</label>
-              <input
-                type="text"
-                placeholder="@you@mastodon.social"
-                className="mt-1 w-full rounded-lg bg-[#f1f5f9] px-4 py-3 text-sm text-[#0b1c30] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#2563eb]"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-medium text-[#434655]">Prize wallet address</label>
-              <input
-                type="text"
-                placeholder="Your Solana wallet (prize sent here)"
-                className="mt-1 w-full rounded-lg bg-[#f1f5f9] px-4 py-3 font-mono text-sm text-[#0b1c30] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#2563eb]"
-              />
-            </div>
-            <button className="w-full rounded-lg bg-[#2563eb] py-3 text-sm font-semibold text-white hover:bg-[#004ac6]">
-              Verify &amp; Enter — Phase 3 (Mastodon)
-            </button>
-          </div>
-        </div>
-
-        {/* Entries */}
-        <div className="rounded-xl border border-[#c3c6d7] bg-white p-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-[#0b1c30]">Entries</h2>
-            <span className="rounded-full bg-[#eff4ff] px-3 py-1 font-mono text-sm font-medium text-[#2563eb]">
-              {campaign.entryCount ?? 0} verified
+          <div className="flex items-start justify-between">
+            <h1 className="text-3xl font-bold" style={{ color: '#0b1c30', letterSpacing: '-0.02em' }}>
+              {event.title}
+            </h1>
+            <span
+              className="mt-1 rounded-full px-3 py-1 text-xs font-medium"
+              style={{
+                backgroundColor: isSettled ? '#e5eeff' : '#c3ffd5',
+                color: isSettled ? '#003ea8' : '#006239',
+              }}
+            >
+              {event.status}
             </span>
           </div>
-          <p className="mt-2 text-sm text-[#737686]">
-            Each entry is an on-chain PDA — verifiable at any time.
-          </p>
+          <div className="mt-2 flex items-center gap-4 text-sm" style={{ color: '#737686' }}>
+            <span className="font-mono">{params.campaign.slice(0, 8)}…{params.campaign.slice(-4)}</span>
+            <span>·</span>
+            <Countdown cutoffTs={event.cutoffTs} />
+            {event.isRecurring && (
+              <>
+                <span>·</span>
+                <span
+                  className="rounded-full px-2 py-0.5 font-mono text-xs"
+                  style={{ backgroundColor: '#dbe1ff', color: '#003ea8' }}
+                >
+                  Recurring
+                </span>
+              </>
+            )}
+          </div>
         </div>
+
+        {/* ── TRUST WIDGET ── */}
+        <PrizePoolPanel
+          campaignPubkey={params.campaign}
+          delegationPda={event.delegationPda}
+          organizer={event.organizer}
+          prizeTotal={event.prizeTotal}
+          numWinners={event.numWinners}
+          isRecurring={event.isRecurring}
+          periodLength={event.periodLength}
+        />
+
+        {/* Winners (if settled) */}
+        {isSettled && draw?.payouts?.length > 0 && (
+          <WinnersPanel
+            drawTxSignature={draw.drawTxSignature}
+            drawSeed={draw.drawSeed}
+            payouts={draw.payouts}
+            totalPaid={draw.totalPaid}
+            numWinners={event.numWinners}
+          />
+        )}
+
+        {/* Requirements + Join form */}
+        {!isSettled && (
+          <JoinForm
+            campaignPubkey={params.campaign}
+            postUrl={event.postUrl}
+            cutoffTs={event.cutoffTs}
+            requireFollow={!!event.organizerMastodonId}
+          />
+        )}
+
+        {/* Entries panel */}
+        <div className="rounded-xl border p-6" style={{ backgroundColor: '#ffffff', borderColor: '#c3c6d7' }}>
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold" style={{ color: '#0b1c30' }}>
+              Verified Entries
+            </h2>
+            <span
+              className="rounded-full px-3 py-1 font-mono text-sm font-medium"
+              style={{ backgroundColor: '#eff4ff', color: '#004ac6' }}
+            >
+              {event.entryCount ?? 0}
+            </span>
+          </div>
+          <p className="mt-2 text-sm" style={{ color: '#737686' }}>
+            Each entry is an on-chain PDA. Entry index and handle hash are publicly
+            verifiable. Handles are stored as sha256 hashes — no PII on-chain.
+          </p>
+          <a
+            href={`https://explorer.solana.com/address/${params.campaign}?cluster=devnet`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-3 inline-block font-mono text-xs underline"
+            style={{ color: '#004ac6' }}
+          >
+            View campaign on Explorer ↗
+          </a>
+        </div>
+
       </div>
     </main>
   );
