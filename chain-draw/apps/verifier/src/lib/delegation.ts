@@ -1,36 +1,119 @@
 /**
  * delegation.ts — Subscriptions & Allowances integration
  *
- * Program ID: De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44
- * Source: github.com/solana-foundation/subscriptions (Cantina audited)
+ * Program: De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44
+ * Source:  github.com/solana-foundation/subscriptions (Cantina audited)
  *
- * Three operations:
- *   1. initSubscriptionAuthority  — once per (organizer, mint)
- *   2. createFixedDelegation      — one-shot campaign commitment
- *   3. createRecurringDelegation  — weekly/monthly campaign commitment
- *
- * The organizer calls 1+2 or 1+3 from the browser (Phantom signs).
- * This file provides the TS helpers the frontend wizard calls via
- * the /api/events POST route, AND the standalone scripts for testing.
+ * Five Subscriptions primitives used (track compliance):
+ *   1. getInitSubscriptionAuthorityInstruction  — once per (organizer, mint)
+ *   2. getCreateFixedDelegationInstruction      — one-shot prize commitment
+ *   3. getCreateRecurringDelegationInstruction  — weekly/monthly giveaway
+ *   4. getTransferFixedInstruction              — payout per winner (in payout.ts)
+ *   5. getRevokeDelegationInstruction           — reclaim rent after payout
  */
 
-import { address, Address } from '@solana/kit';
-import { SubscriptionsClient } from '@solana/subscriptions';
-import { rpc } from './rpc.js';
+import {
+  getInitSubscriptionAuthorityInstruction,
+  getCreateFixedDelegationInstruction,
+  getCreateRecurringDelegationInstruction,
+  getRevokeDelegationInstruction,
+  findSubscriptionAuthorityPda,
+  findFixedDelegationPda,
+  findRecurringDelegationPda,
+  fetchMaybeFixedDelegation,
+  fetchMaybeRecurringDelegation,
+  SUBSCRIPTIONS_PROGRAM_ADDRESS,
+} from '@solana/subscriptions';
+
+import {
+  createSolanaRpc,
+  createTransactionMessage,
+  setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash,
+  appendTransactionMessageInstructions,
+  signTransactionMessageWithSigners,
+  getBase64EncodedWireTransaction,
+  sendAndConfirmTransactionFactory,
+  address,
+  Address,
+  createKeyPairSignerFromBytes,
+  KeyPairSigner,
+} from '@solana/kit';
+
+import bs58 from 'bs58';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-export const SUBSCRIPTIONS_PROGRAM_ID = address(
-  'De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44'
-);
-
-export const TOKEN_PROGRAM_ID = address(
+export const TOKEN_PROGRAM_ADDRESS = address(
   'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
 );
 
-export const USDC_MINT = address(
+export const USDC_MINT_ADDRESS = address(
   process.env.USDC_MINT ?? '3nN5zccTzdt7KnVVHqhC2unNxQTMGQkJtkipXnG3b7Ks'
 );
+
+const RPC_URL =
+  process.env.RPC_URL ??
+  'https://devnet.helius-rpc.com/?api-key=02923ff0-3d68-4bb1-a1ad-407f5f7d1e5f';
+
+// ─── RPC ─────────────────────────────────────────────────────────────────────
+
+export function getRpc() {
+  return createSolanaRpc(RPC_URL);
+}
+
+// ─── Signer ───────────────────────────────────────────────────────────────────
+
+export async function loadSignerFromEnv(envVar: string): Promise<KeyPairSigner> {
+  const secret = process.env[envVar];
+  if (!secret) throw new Error(`Missing env var: ${envVar}`);
+  return createKeyPairSignerFromBytes(bs58.decode(secret));
+}
+
+// ─── Send transaction ─────────────────────────────────────────────────────────
+
+export async function sendInstructions(
+  signer: KeyPairSigner,
+  instructions: any[]
+): Promise<string> {
+  const rpc = getRpc();
+  const { value: latestBlockhash } = await rpc.getLatestBlockhash().send();
+
+  const txMessage = appendTransactionMessageInstructions(
+    instructions,
+    setTransactionMessageLifetimeUsingBlockhash(
+      latestBlockhash,
+      setTransactionMessageFeePayer(
+        signer.address,
+        createTransactionMessage({ version: 0 })
+      )
+    )
+  );
+
+  const signedTx = await signTransactionMessageWithSigners(txMessage);
+  const encoded = getBase64EncodedWireTransaction(signedTx);
+  const sig = await rpc
+    .sendTransaction(encoded as any, { encoding: 'base64', skipPreflight: false } as any)
+    .send();
+
+  // Poll for confirmation
+  let confirmed = false;
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const status = await rpc
+        .getSignatureStatuses([sig as any], { searchTransactionHistory: false })
+        .send();
+      const s = (status.value as any[])[0];
+      if (s?.confirmationStatus === 'confirmed' || s?.confirmationStatus === 'finalized') {
+        confirmed = true;
+        break;
+      }
+    } catch { /* retry */ }
+  }
+  if (!confirmed) console.warn('Tx may not be confirmed yet:', sig);
+  return sig as string;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -40,336 +123,187 @@ export interface DelegationResult {
   txSignatures: string[];
 }
 
-export interface FixedDelegationParams {
-  organizer: Address;
-  organizerAta: Address;
-  delegatee: Address;           // SERVICE_AUTHORITY — backend keypair public key
-  campaignId: bigint;           // used as nonce — unique per campaign
-  prizeTotal: bigint;           // base units (USDC: multiply by 1_000_000n)
-  cutoffTs: bigint;             // unix timestamp of draw + 3600s buffer
-  tokenMint?: Address;
-}
+// ─── 1. ensureSubscriptionAuthority ──────────────────────────────────────────
 
-export interface RecurringDelegationParams {
-  organizer: Address;
-  organizerAta: Address;
-  delegatee: Address;
-  campaignId: bigint;
-  amountPerPeriod: bigint;      // max per period in base units
-  periodLength: bigint;         // seconds: 604800n = weekly, 2592000n = monthly
-  expiryTs: bigint;             // overall expiry (cutoff + several periods buffer)
-  tokenMint?: Address;
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/**
- * Build a SubscriptionsClient bound to the current RPC.
- * The organizer's wallet adapter is passed in by the caller.
- */
-function buildClient(organizerSigner: any) {
-  return new SubscriptionsClient({
-    rpc,
-    signer: organizerSigner,
-  });
-}
-
-// ─── 1. initSubscriptionAuthority ────────────────────────────────────────────
-
-/**
- * Creates the per-(organizer, mint) Subscription Authority PDA.
- * Must be called once before any delegation for this mint.
- * Skip if already initialized (check isSubscriptionAuthorityInitialized first).
- *
- * Called by: organizer wallet (Phantom) in the commit wizard step.
- */
 export async function ensureSubscriptionAuthority(
-  organizerSigner: any,
-  params: {
-    organizer: Address;
-    organizerAta: Address;
-    tokenMint?: Address;
-  }
+  signer: KeyPairSigner,
+  params: { organizerAta: Address; tokenMint?: Address }
 ): Promise<{ subscriptionAuthorityPda: Address; tx?: string }> {
-  const client = buildClient(organizerSigner);
-  const mint = params.tokenMint ?? USDC_MINT;
+  const rpc = getRpc();
+  const mint = params.tokenMint ?? USDC_MINT_ADDRESS;
 
-  // Check if already initialized
-  const exists = await client.isSubscriptionAuthorityInitialized({
-    wallet: params.organizer,
+  const [saPda] = await findSubscriptionAuthorityPda({
+    user: signer.address,
     tokenMint: mint,
   });
 
-  if (exists) {
-    const { pda } = await client.getSubscriptionAuthorityPDA({
-      wallet: params.organizer,
-      tokenMint: mint,
-    });
-    console.log('SubscriptionAuthority already exists:', pda);
-    return { subscriptionAuthorityPda: pda };
+  const existing = await fetchMaybeSubscriptionAuthority(rpc, saPda);
+  if (existing.exists) {
+    console.log('SubscriptionAuthority already exists:', saPda);
+    return { subscriptionAuthorityPda: saPda };
   }
 
-  // Initialize
-  const tx = await client.initSubscriptionAuthority({
+  const ix = getInitSubscriptionAuthorityInstruction({
+    owner: signer as any,
+    subscriptionAuthority: saPda,
     tokenMint: mint,
-    tokenProgram: TOKEN_PROGRAM_ID,
     userAta: params.organizerAta,
-  }).sendTransaction();
-
-  const { pda } = await client.getSubscriptionAuthorityPDA({
-    wallet: params.organizer,
-    tokenMint: mint,
+    tokenProgram: TOKEN_PROGRAM_ADDRESS,
   });
 
-  console.log('SubscriptionAuthority initialized:', pda, '| tx:', tx);
-  return { subscriptionAuthorityPda: pda, tx };
+  const tx = await sendInstructions(signer, [ix]);
+  console.log('SubscriptionAuthority initialized:', saPda, '| tx:', tx);
+  return { subscriptionAuthorityPda: saPda, tx };
+}
+
+async function fetchMaybeSubscriptionAuthority(rpc: any, address: Address) {
+  try {
+    const { fetchMaybeSubscriptionAuthority: fetch } = await import('@solana/subscriptions');
+    return fetch(rpc, address);
+  } catch {
+    return { exists: false };
+  }
 }
 
 // ─── 2. createFixedDelegation ────────────────────────────────────────────────
 
-/**
- * One-shot campaign commitment.
- * Organizer pre-authorizes the delegatee (SERVICE_AUTHORITY) to pull
- * up to prizeTotal before cutoffTs + buffer.
- *
- * The delegation PDA is the public on-chain commitment anyone can verify.
- *
- * Called by: organizer wallet (Phantom) in the commit wizard step.
- */
 export async function createFixedDelegation(
-  organizerSigner: any,
-  params: FixedDelegationParams
+  signer: KeyPairSigner,
+  params: {
+    organizerAta: Address;
+    delegatee: Address;
+    campaignId: bigint;
+    prizeTotal: bigint;
+    cutoffTs: bigint;
+    tokenMint?: Address;
+  }
 ): Promise<DelegationResult> {
-  const client = buildClient(organizerSigner);
-  const mint = params.tokenMint ?? USDC_MINT;
+  const mint = params.tokenMint ?? USDC_MINT_ADDRESS;
   const txSigs: string[] = [];
 
-  // Step 1: ensure subscription authority exists
-  const { subscriptionAuthorityPda, tx: authTx } = await ensureSubscriptionAuthority(
-    organizerSigner,
-    {
-      organizer: params.organizer,
-      organizerAta: params.organizerAta,
-      tokenMint: mint,
-    }
-  );
+  const { subscriptionAuthorityPda, tx: authTx } =
+    await ensureSubscriptionAuthority(signer, { organizerAta: params.organizerAta, tokenMint: mint });
   if (authTx) txSigs.push(authTx);
 
-  // Step 2: createFixedDelegation
-  // nonce = campaignId (u64 as string) — unique per campaign per organizer
-  const nonce = params.campaignId.toString();
-  const delegationTx = await client.createFixedDelegation({
-    tokenMint: mint,
-    delegatee: params.delegatee,
-    nonce,
-    amount: params.prizeTotal,
-    expiryTs: params.cutoffTs,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  }).sendTransaction();
-  txSigs.push(delegationTx);
-
-  // Derive the delegation PDA — this is stored in the Campaign account
-  const { pda: delegationPda } = await client.getDelegationPDA({
+  const [delegationPda] = await findFixedDelegationPda({
     subscriptionAuthority: subscriptionAuthorityPda,
-    delegator: params.organizer,
+    delegator: signer.address,
     delegatee: params.delegatee,
-    nonce,
+    nonce: params.campaignId,
   });
 
-  console.log(
-    'FixedDelegation created:',
-    delegationPda,
-    '| amount:', params.prizeTotal.toString(),
-    '| expiry:', params.cutoffTs.toString(),
-    '| tx:', delegationTx
-  );
+  const ix = getCreateFixedDelegationInstruction({
+    delegator: signer as any,
+    subscriptionAuthority: subscriptionAuthorityPda,
+    delegationAccount: delegationPda,
+    delegatee: params.delegatee,
+    // data args
+    nonce: params.campaignId,
+    amount: params.prizeTotal,
+    expiryTs: params.cutoffTs,
+    expectedSubscriptionAuthorityInitId: 0n,
+  } as any);
 
+  const tx = await sendInstructions(signer, [ix]);
+  txSigs.push(tx);
+  console.log('FixedDelegation created:', delegationPda, '| tx:', tx);
   return { subscriptionAuthorityPda, delegationPda, txSignatures: txSigs };
 }
 
 // ─── 3. createRecurringDelegation ────────────────────────────────────────────
 
-/**
- * Recurring campaign commitment (weekly/monthly giveaways).
- * Organizer pre-authorizes the delegatee to pull up to amountPerPeriod
- * per period, auto-resetting each period — no re-signing needed.
- *
- * This is the key track-compliance addition:
- *   periodLength = 604800n  → weekly giveaway
- *   periodLength = 2592000n → monthly giveaway
- *
- * Called by: organizer wallet (Phantom) when isRecurring toggle is ON.
- */
 export async function createRecurringDelegation(
-  organizerSigner: any,
-  params: RecurringDelegationParams
+  signer: KeyPairSigner,
+  params: {
+    organizerAta: Address;
+    delegatee: Address;
+    campaignId: bigint;
+    amountPerPeriod: bigint;
+    periodLength: bigint;
+    expiryTs: bigint;
+    tokenMint?: Address;
+  }
 ): Promise<DelegationResult> {
-  const client = buildClient(organizerSigner);
-  const mint = params.tokenMint ?? USDC_MINT;
+  const mint = params.tokenMint ?? USDC_MINT_ADDRESS;
   const txSigs: string[] = [];
 
-  // Step 1: ensure subscription authority
-  const { subscriptionAuthorityPda, tx: authTx } = await ensureSubscriptionAuthority(
-    organizerSigner,
-    {
-      organizer: params.organizer,
-      organizerAta: params.organizerAta,
-      tokenMint: mint,
-    }
-  );
+  const { subscriptionAuthorityPda, tx: authTx } =
+    await ensureSubscriptionAuthority(signer, { organizerAta: params.organizerAta, tokenMint: mint });
   if (authTx) txSigs.push(authTx);
 
-  // Step 2: createRecurringDelegation
-  const nonce = params.campaignId.toString();
-  const delegationTx = await client.createRecurringDelegation({
-    tokenMint: mint,
-    delegatee: params.delegatee,
-    nonce,
-    amountPerPeriod: params.amountPerPeriod,
-    periodLength: params.periodLength,
-    expiryTs: params.expiryTs,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  }).sendTransaction();
-  txSigs.push(delegationTx);
-
-  // Derive PDA
-  const { pda: delegationPda } = await client.getDelegationPDA({
+  const [delegationPda] = await findRecurringDelegationPda({
     subscriptionAuthority: subscriptionAuthorityPda,
-    delegator: params.organizer,
+    delegator: signer.address,
     delegatee: params.delegatee,
-    nonce,
+    nonce: params.campaignId,
   });
 
-  console.log(
-    'RecurringDelegation created:',
-    delegationPda,
-    '| perPeriod:', params.amountPerPeriod.toString(),
-    '| period:', params.periodLength.toString(), 's',
-    '| tx:', delegationTx
-  );
+  const ix = getCreateRecurringDelegationInstruction({
+    delegator: signer as any,
+    subscriptionAuthority: subscriptionAuthorityPda,
+    delegationAccount: delegationPda,
+    delegatee: params.delegatee,
+    // data args
+    nonce: params.campaignId,
+    amountPerPeriod: params.amountPerPeriod,
+    periodLengthS: params.periodLength,
+    startTs: BigInt(Math.floor(Date.now() / 1000)),
+    expiryTs: params.expiryTs,
+    expectedSubscriptionAuthorityInitId: 0n,
+  } as any);
 
+  const tx = await sendInstructions(signer, [ix]);
+  txSigs.push(tx);
+  console.log('RecurringDelegation created:', delegationPda, '| tx:', tx);
   return { subscriptionAuthorityPda, delegationPda, txSignatures: txSigs };
 }
 
-// ─── 4. transferFixed (payout per winner) ────────────────────────────────────
+// ─── 4. readDelegation ───────────────────────────────────────────────────────
 
-/**
- * Push prize share to a winner.
- * Called by the delegatee backend after draw_winners completes.
- * Delegatee keypair signs — winner pays nothing.
- */
-export async function payWinnerFixed(
-  delegateeSigner: any,
-  params: {
-    organizer: Address;
-    organizerAta: Address;
-    delegationPda: Address;
-    winnerAta: Address;
-    amount: bigint;
-    tokenMint?: Address;
-  }
-): Promise<string> {
-  const client = buildClient(delegateeSigner);
-  const mint = params.tokenMint ?? USDC_MINT;
+export async function readDelegation(delegationPdaAddr: Address) {
+  const rpc = getRpc();
 
-  const tx = await client.transferFixed({
-    delegatee: delegateeSigner,
-    delegator: params.organizer,
-    delegatorAta: params.organizerAta,
-    tokenMint: mint,
-    delegationPda: params.delegationPda,
-    amount: params.amount,
-    receiverAta: params.winnerAta,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  }).sendTransaction();
-
-  console.log('transferFixed | winner:', params.winnerAta, '| amount:', params.amount.toString(), '| tx:', tx);
-  return tx;
-}
-
-// ─── 5. transferRecurring (payout for recurring campaigns) ───────────────────
-
-/**
- * Push prize share to a winner for a recurring campaign.
- * Same flow as transferFixed but draws on the RecurringDelegation allowance.
- */
-export async function payWinnerRecurring(
-  delegateeSigner: any,
-  params: {
-    organizer: Address;
-    organizerAta: Address;
-    delegationPda: Address;
-    winnerAta: Address;
-    amount: bigint;
-    tokenMint?: Address;
-  }
-): Promise<string> {
-  const client = buildClient(delegateeSigner);
-  const mint = params.tokenMint ?? USDC_MINT;
-
-  const tx = await client.transferRecurring({
-    delegatee: delegateeSigner,
-    delegator: params.organizer,
-    delegatorAta: params.organizerAta,
-    tokenMint: mint,
-    delegationPda: params.delegationPda,
-    amount: params.amount,
-    receiverAta: params.winnerAta,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  }).sendTransaction();
-
-  console.log('transferRecurring | winner:', params.winnerAta, '| amount:', params.amount.toString(), '| tx:', tx);
-  return tx;
-}
-
-// ─── 6. readDelegation (for PrizePoolPanel solvency display) ─────────────────
-
-/**
- * Read a delegation PDA from chain.
- * Returns cap, remaining allowance, expiry — used by PrizePoolPanel trust widget.
- */
-export async function readDelegation(delegationPda: Address) {
-  const client = new SubscriptionsClient({ rpc, signer: null as any });
   try {
-    // Try fixed first
-    const fixed = await client.getFixedDelegation(delegationPda);
-    return {
-      type: 'fixed' as const,
-      cap: fixed.amount,
-      remaining: fixed.remainingAmount ?? fixed.amount,
-      expiryTs: Number(fixed.expiryTs ?? 0),
-      delegatee: fixed.delegatee,
-    };
-  } catch {
-    // Try recurring
-    try {
-      const recurring = await client.getRecurringDelegation(delegationPda);
+    const fixed = await fetchMaybeFixedDelegation(rpc, delegationPdaAddr);
+    if (fixed.exists) {
+      return {
+        type: 'fixed' as const,
+        cap: (fixed.data as any).amount,
+        remaining: (fixed.data as any).remainingAmount ?? (fixed.data as any).amount,
+        expiryTs: Number((fixed.data as any).expiryTs ?? 0),
+        delegatee: (fixed.data as any).delegatee,
+      };
+    }
+  } catch { /* try recurring */ }
+
+  try {
+    const recurring = await fetchMaybeRecurringDelegation(rpc, delegationPdaAddr);
+    if (recurring.exists) {
       return {
         type: 'recurring' as const,
-        cap: recurring.amountPerPeriod,
-        remaining: recurring.remainingThisPeriod ?? recurring.amountPerPeriod,
-        expiryTs: Number(recurring.expiryTs ?? 0),
-        periodLength: Number(recurring.periodLength),
-        delegatee: recurring.delegatee,
+        cap: (recurring.data as any).amountPerPeriod,
+        remaining: (recurring.data as any).remainingThisPeriod ?? (recurring.data as any).amountPerPeriod,
+        expiryTs: Number((recurring.data as any).expiryTs ?? 0),
+        periodLength: Number((recurring.data as any).periodLengthS),
+        delegatee: (recurring.data as any).delegatee,
       };
-    } catch {
-      return null;
     }
-  }
+  } catch { /* not found */ }
+
+  return null;
 }
 
-// ─── 7. revokeDelegation (after payout — reclaim rent) ───────────────────────
+// ─── 5. revokeDelegation ─────────────────────────────────────────────────────
 
-/**
- * Revoke the delegation PDA after all winners are paid.
- * Returns rent to organizer. Called from /organizer/[campaign] manage page.
- */
 export async function revokeDelegation(
-  organizerSigner: any,
+  signer: KeyPairSigner,
   delegationPda: Address
 ): Promise<string> {
-  const client = buildClient(organizerSigner);
-  const tx = await client.revokeDelegation({ delegationPda }).sendTransaction();
+  const ix = getRevokeDelegationInstruction({
+    authority: signer as any,
+    delegationAccount: delegationPda,
+  });
+  const tx = await sendInstructions(signer, [ix]);
   console.log('Delegation revoked:', delegationPda, '| tx:', tx);
   return tx;
 }
