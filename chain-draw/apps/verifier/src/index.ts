@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const cors = require('cors') as (opts?: any) => any;
+import cors from 'cors';
 import { joinRouter } from './routes/join.js';
 import { verifyStatusRouter } from './routes/verifyStatus.js';
 import { drawRouter } from './routes/draw.js';
