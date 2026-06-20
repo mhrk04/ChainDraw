@@ -1,0 +1,28 @@
+# Rust / Anchor
+target/
+.anchor/
+**/*.so
+
+# Node
+node_modules/
+.yarn/
+yarn.lock
+
+# Keys — NEVER commit real keypairs
+keys/*.json
+!keys/.gitkeep
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Next.js
+apps/web/.next/
+apps/web/out/
+
+# Verifier build
+apps/verifier/dist/
+
+# OS
+.DS_Store
