@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
+import { ClientWalletButton } from '@/components/ClientWalletButton';
 
 export function NavBar() {
   const pathname = usePathname();
@@ -56,7 +56,7 @@ export function NavBar() {
 
         {/* Wallet connect */}
         <div className="flex items-center gap-3">
-          <WalletMultiButton
+          <ClientWalletButton
             style={{
               backgroundColor: '#004ac6',
               borderRadius: '0.5rem',

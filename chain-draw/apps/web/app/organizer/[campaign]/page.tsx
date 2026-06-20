@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
+import { ClientWalletButton } from '@/components/ClientWalletButton';
 import { WinnersPanel } from '@/components/WinnersPanel';
 import { PrizePoolPanel } from '@/components/PrizePoolPanel';
 import { VERIFIER_API } from '@/lib/constants';
@@ -83,7 +83,7 @@ export default function ManageEventPage({ params }: Props) {
           <p className="text-4xl">🔒</p>
           <h1 className="mt-4 text-xl font-semibold" style={{ color: '#0b1c30' }}>Connect wallet</h1>
           <div className="mt-6 flex justify-center">
-            <WalletMultiButton style={{ backgroundColor: '#004ac6', borderRadius: '0.5rem' }} />
+            <ClientWalletButton style={{ backgroundColor: '#004ac6', borderRadius: '0.5rem' }} />
           </div>
         </div>
       </main>

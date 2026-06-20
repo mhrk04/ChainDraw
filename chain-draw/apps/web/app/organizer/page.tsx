@@ -4,7 +4,7 @@
 // Stitch screen: 0e229b502dcd4cf7854f62f04cca864e
 
 import { useWallet } from '@solana/wallet-adapter-react';
-import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
+import { ClientWalletButton } from '@/components/ClientWalletButton';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { VERIFIER_API } from '@/lib/constants';
@@ -42,7 +42,7 @@ export default function OrganizerPage() {
             Connect your Phantom wallet to manage your giveaways.
           </p>
           <div className="mt-6 flex justify-center">
-            <WalletMultiButton
+            <ClientWalletButton
               style={{
                 backgroundColor: '#004ac6',
                 borderRadius: '0.5rem',

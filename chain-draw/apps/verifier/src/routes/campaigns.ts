@@ -66,8 +66,9 @@ campaignsRouter.post('/create', async (req, res) => {
     const program = getProgram(verifierKp);
 
     const campaignIdBig = BigInt(campaignId);
-    const organizerPk = new PublicKey(organizer);
-    const [campaignPda] = deriveCampaignPda(organizerPk, campaignIdBig);
+    // Demo: verifier signs, so PDA seeds must use the signer's key
+    // (Anchor uses organizer.key().as_ref() which = verifierKp.publicKey)
+    const [campaignPda] = deriveCampaignPda(verifierKp.publicKey, campaignIdBig);
 
     const requirementsUri = postUrl.slice(0, 200);
 
