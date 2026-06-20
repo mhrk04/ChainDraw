@@ -1,37 +1,62 @@
 import { useEffect, useState } from 'react';
+import { VERIFIER_API } from '@/lib/constants';
 
 export interface DelegationInfo {
   pda: string;
-  cap: bigint;       // total authorized amount (base units)
-  remaining: bigint; // remaining allowance
-  expiryTs: number;
+  type: 'fixed' | 'recurring';
+  cap: string;          // base units as string (bigint serialised)
+  remaining: string;    // base units as string
+  expiryTs: number;     // unix timestamp
   isExpired: boolean;
-  isRecurring: boolean;
-  periodLength?: number;
-  amountPerPeriod?: bigint;
+  isSolvent: boolean;   // true when organizer balance >= cap
+  periodLength?: number; // seconds — only for recurring
+  organizerBalance?: string; // live USDC balance in base units
 }
 
-export function useDelegation(delegationPda: string | null) {
+export function useDelegation(delegationPda: string | null, campaignPubkey: string | null) {
   const [delegation, setDelegation] = useState<DelegationInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!delegationPda) return;
+    if (!campaignPubkey) return;
 
-    const fetch = async () => {
+    const fetchDelegation = async () => {
       setLoading(true);
       try {
-        // TODO Phase 2: deserialize FixedDelegation or RecurringDelegation PDA from chain
-        setDelegation(null);
+        // Fetch from verifier API which enriches with live chain data
+        const res = await fetch(`${VERIFIER_API}/api/events/${campaignPubkey}`);
+        if (!res.ok) throw new Error('Failed to fetch campaign');
+        const data = await res.json();
+
+        const info = data.delegationInfo;
+        if (!info) {
+          setDelegation(null);
+          return;
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        setDelegation({
+          pda: delegationPda ?? data.delegationPda,
+          type: info.type,
+          cap: info.cap?.toString() ?? data.prizeTotal,
+          remaining: info.remaining?.toString() ?? info.cap?.toString() ?? data.prizeTotal,
+          expiryTs: info.expiryTs,
+          isExpired: info.expiryTs > 0 && now > info.expiryTs,
+          isSolvent: true, // Phase 5: compare organizer balance vs cap
+          periodLength: info.periodLength,
+        });
+      } catch (e) {
+        setError(String(e));
       } finally {
         setLoading(false);
       }
     };
 
-    fetch();
-    const interval = setInterval(fetch, 10_000);
+    fetchDelegation();
+    const interval = setInterval(fetchDelegation, 10_000);
     return () => clearInterval(interval);
-  }, [delegationPda]);
+  }, [delegationPda, campaignPubkey]);
 
-  return { delegation, loading };
+  return { delegation, loading, error };
 }
